@@ -96,8 +96,7 @@ class UiObjectSelection(UiElementWrapper):
         super(UiObjectSelection, self).set_value(value)
 
         # Update textfield value.
-        if not self.value == value:
-            pm.textFieldButtonGrp(self.id, e=True, tx=value)
+        pm.textFieldButtonGrp(self.id, e=True, tx=value)
 
 
 class UiTextField(UiElementWrapper):
