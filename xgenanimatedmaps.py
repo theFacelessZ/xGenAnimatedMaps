@@ -384,12 +384,6 @@ class XgenAnim:
 
         self.window.show()
 
-    def buid_menu(self):
-        if pm.menuItem(exist=self.ui_id):
-           return
-
-        pm.menu('xGenAnim')
-
     def get_collection(self):
         return self.settings.get('xgenCollection', '')
 
