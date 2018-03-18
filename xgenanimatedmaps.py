@@ -340,11 +340,6 @@ class PtxBaker(XgenAnimSettingsDependant):
             self.project.ui_progress.set_step()
 
         # Set the attribute script.
-        attr.append_line(
-            'else {'
-        ).append_line(
-            '$a=map('
-        )
         attr.append_line('$a').commit()
 
 
