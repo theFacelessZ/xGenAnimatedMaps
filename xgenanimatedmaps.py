@@ -1,9 +1,10 @@
-from functools import partial
 import maya.cmds as cmds
 import pymel.core as pm
 import xgenm as xg
 import os
+import shutil
 import unicodedata
+import re
 
 
 class Utils:
@@ -12,10 +13,50 @@ class Utils:
     def safe_string(value):
         return unicodedata.normalize('NFKD', value).encode('ascii', 'ignore')
 
+    @staticmethod
+    def use_global_vars(value, project):
+        collection = project.settings.get('xgenCollection')
+        description = project.settings.get('xgenDescription')
+        path = xg.descriptionPath(collection, description)
+
+        return value.replace('${DESC}', path)
+
+
+class XgenAttributeWrapper(object):
+
+    def __init__(self, id, collection, description, obj):
+        self.id = id
+        self.collection = collection
+        self.description = description
+        self.object = obj
+        self.value = self.get()
+
+    def get(self):
+        return xg.getAttr(self.id, self.collection, self.description, self.object)
+
+    def commit(self):
+        xg.setAttr(self.id, xg.prepForAttribute(self.value), self.collection, self.description, self.object)
+
+        # Refresh the ui.
+        xg.xgGlobal.DescriptionEditor.refresh('Full')
+
+    def clear(self):
+        self.value = ''
+
+        return self
+
+    def append_line(self, value=''):
+        self.value += '%s\n' % value
+
+        return self
+
 
 # Look, autodesk, this is how it must've actually worked from the box.
 # Amen.
 class UiElementWrapper(object):
+    """
+    Implements basic ui element wrapper.
+    """
 
     def __init__(self, id, default_value='', change_callback=None, project=None):
         self.id_pure = id
@@ -23,11 +64,11 @@ class UiElementWrapper(object):
         self.value = ''
         self.settings = None
 
-        if default_value:
-            self.set_value(default_value)
-
         if project:
             self.settings = project.settings
+
+        if default_value:
+            self.set_value(default_value)
 
     def set_value(self, value):
         if type(value) is unicode:
@@ -42,7 +83,55 @@ class UiElementWrapper(object):
             self.on_change()
 
 
+class UiProgressBar(UiElementWrapper):
+    """
+    Implements encapsulated progress bar ui element.
+    """
+
+    def __init__(self, id, max_value=100):
+        super(UiProgressBar, self).__init__(id)
+
+        self.id = pm.progressBar(id, maxValue=max_value)
+
+        self.max_value = max_value
+        self.progress = 0
+
+    def is_cancelled(self):
+        return pm.progressBar(self.id, q=True, isCancelled=True) or False
+
+    def cancel(self):
+        pm.progressBar(self.id, e=True, isCancelled=True)
+
+        return self
+
+    def set_status(self, value):
+        pm.progressBar(self.id, e=True, status=value)
+
+        return self
+
+    def set_max_value(self, value):
+        pm.progressBar(self.id, e=True, maxValue=value)
+        self.max_value = value
+
+        return self
+
+    def set_step(self, value=1):
+        pm.progressBar(self.id, e=True, step=value)
+        self.progress += value
+
+        return self
+
+    def set_progress(self, value):
+        pm.progressBar(self.id, e=True, progress=value)
+        self.progress = value
+
+        return self
+
+
 class UiOptionMenu(UiElementWrapper):
+    """
+    Implements encapsulated option menu ui element.
+    """
 
     def __init__(self, id, value='', label='', change_callback=None, project=None):
         super(UiOptionMenu, self).__init__(id, value, change_callback, project)
@@ -68,6 +157,9 @@ class UiOptionMenu(UiElementWrapper):
 
 
 class UiObjectSelection(UiElementWrapper):
+    """
+    Implements encapsulated object selection ui element.
+    """
 
     def __init__(self, id, object_type='', label='', button_label='Selection', change_callback=None, project=None):
         super(UiObjectSelection, self).__init__(id, change_callback=change_callback, project=project)
@@ -100,6 +192,9 @@ class UiObjectSelection(UiElementWrapper):
 
 
 class UiTextField(UiElementWrapper):
+    """
+    Implements encapsulated text field ui element.
+    """
 
     def __init__(self, id, label='', default_value='', project=None):
         super(UiTextField, self).__init__(id, default_value=default_value, project=project)
@@ -109,6 +204,9 @@ class UiTextField(UiElementWrapper):
 
 
 class ProjectSettings:
+    """
+    Implements project settings data structure.
+    """
 
     def __init__(self):
         pass
@@ -133,14 +231,17 @@ class ProjectSettings:
 class XgenAnimSettingsDependant(object):
 
     def __init__(self, project, required_settings=[]):
-        self.settings = project.settings
+        self.project = project
         self.required_settings = required_settings
+
+    def get_settings(self, id, default_value=None):
+        return self.project.settings.get(id, default_value)
 
     def validate(self):
         result = True
 
         for item in self.required_settings:
-            if not self.settings.has(item):
+            if not self.project.settings.has(item):
                 result = False
 
                 break
@@ -156,29 +257,95 @@ class PtxBaker(XgenAnimSettingsDependant):
         (PtxBaker(project)).convert()
 
     def __init__(self, project):
-        super(PtxBaker, self).__init__(project, ['xgenSequence', 'xgenEmitter', 'xgenMap'])
+        super(PtxBaker, self).__init__(project, ['xgenCollection', 'xgenDescription', 'xgenSequence',
+                                                 'xgenEmitter', 'xgenAttribute'])
+
+    def get_assigned_map(self):
+        collection = self.get_settings('xgenCollection')
+        description = self.get_settings('xgenDescription')
+        attr = self.get_settings('xgenAttribute')
+        obj = self.get_settings('xgenObject')
+        attr_value = xg.getAttr(attr, collection, description, obj)
+
+        attr_map = re.search("^[^#]+=map\(\\'(.*?)\\'", attr_value)
+        if attr_map:
+            attr_map = attr_map.group(1).replace('${DESC}', '')
+
+        # Perform regex test.
+        return attr_map
 
     def convert(self):
         # Validate settings fields.
         if not self.validate():
             return cmds.warning('Missing required settings.')
 
-        path = '%s/xgen/animated_bakes/%s/' % (cmds.workspace(q=True, rd=True), self.settings.get('xgenMap'))
-        emitter = self.settings.get('xgenEmitter')
-        # bake_file = '%s%s.ptx' %()
+        collection = self.get_settings('xgenCollection')
+        description = self.get_settings('xgenDescription')
+        emitter = self.get_settings('xgenEmitter')
+        sequence = self.get_settings('xgenSequence')
+        attr = self.get_settings('xgenAttribute')
+        obj = self.get_settings('xgenObject')
+        start_frame = int(cmds.playbackOptions(q=True, minTime=True))
+        end_frame = int(cmds.playbackOptions(q=True, maxTime=True))
+        tpu = self.get_settings('xgenResolution', 100)
+
+        # Check whether the alleged attribute has a map assigned.
+        path_map = self.get_assigned_map()
+        if not path_map:
+            return cmds.warning('No map is currently assigned to the channel selected.')
+
+        path_map = '/paintmaps/%s' % attr
+        path = '%s/%s/' % (xg.descriptionPath(collection, description), path_map)
+        path_bake = '%s%s.ptx' % (path, emitter)
+
+        # Prepare the ui.
+        self.project.ui_progress.set_max_value(end_frame).set_progress(start_frame)
+
+        # And the attribute wrapper.
+        attr = XgenAttributeWrapper(attr, collection, description, obj)
+        attr.clear().append_line(
+            '# This script has been generated by xgen animated maps script.'
+        ).append_line(
+            "# You're free to modify it as you please, just remember to do that with care."
+        )
 
         # Bake it.
-        for frame in range(int(cmds.playbackOptions(q=True, minTime=True)), int(cmds.playbackOptions(q=True, maxTime=True))):
+        for frame in range(start_frame, end_frame):
             # Set current time.
             cmds.currentTime(frame)
 
-            cmds.ptexBake(inMesh=emitter, o=path, bt=self.settings.get('xgenSequence'),
-                          tpu=self.settings.get('xgenResolution', 100))
+            cmds.ptexBake(inMesh=emitter, o=path, bt=sequence, tpu=tpu)
 
-            bake_file = '%s%s.0%s.ptx' % (path, emitter, frame)
-            if os.path.isfile(bake_file):
-                # shutil.copy2()
-                pass
+            if os.path.isfile(path_bake):
+                frame_file = '%s%s.%s.ptx' % (path, emitter, frame)
+                shutil.copy2(path_bake, frame_file)
+
+            # Append a new frame reference to the attribute.
+            if not frame == end_frame:
+                attr.append_line(
+                    '%s ($frame < %s) {' % ('if' if frame == start_frame else 'else if', frame)
+                )
+            else:
+                attr.append_line(
+                    'else {'
+                )
+
+            attr.append_line(
+                '\t$a=map(\'${DESC}%s/%s.%s.ptx\');' % (path_map, emitter, frame)
+            ).append_line(
+                '}'
+            )
+
+            # Increase progress bar position.
+            self.project.ui_progress.set_step()
+
+        # Set the attribute script.
+        attr.append_line(
+            'else {'
+        ).append_line(
+            '$a=map('
+        )
+        attr.append_line('$a').commit()
 
 
 class XgenAnim:
@@ -204,21 +371,29 @@ class XgenAnim:
                                                    change_callback=self.update_objects, project=self)
                 self.ui_objects = UiOptionMenu('xgenObject', label='Object',
                                                change_callback=self.update_attributes, project=self)
-                self.ui_attributes = UiOptionMenu('xgenAttribute', label='Attribute',
-                                                  project=self)
+                self.ui_attributes = UiOptionMenu('xgenAttribute', label='Attribute', project=self)
 
                 # Set the collection items to trigger the rest.
                 self.update_collections()
 
                 pm.button('update', label='Update', c=self.update_collections)
 
-                self.ui_sequence = UiObjectSelection('xgenSequence', label='Animated Sequence Node', object_type='file', project=self)
-                self.ui_emitter = UiObjectSelection('xgenEmitter', label='xGen Emitter Object', object_type='transform', project=self)
-                self.ui_map = UiTextField('xgenMap', label='Result map path', default_value='default/map', project=self)
+                self.ui_sequence = UiObjectSelection('xgenSequence', label='Animated Sequence Node',
+                                                     object_type='file', project=self)
+                self.ui_emitter = UiObjectSelection('xgenEmitter', label='xGen Emitter Object',
+                                                    object_type='transform', project=self)
+
+                self.ui_progress = UiProgressBar('xgenProgress', 1000)
 
                 pm.button('assign', label='Assign', c=self.assign)
 
         self.window.show()
+
+    def buid_menu(self):
+        if pm.menuItem(exist=self.ui_id):
+           return
+
+        pm.menu('xGenAnim')
 
     def get_collection(self):
         return self.settings.get('xgenCollection', '')
@@ -228,6 +403,9 @@ class XgenAnim:
 
     def get_object(self):
         return self.settings.get('xgenObject', '')
+
+    def get_attribute(self):
+        return self.settings.get('xgenAttribute', '')
 
     def update_collections(self, flag=False):
         if not self.ui_collection:
@@ -258,7 +436,7 @@ class XgenAnim:
         attributes = xg.allAttrs(self.get_collection(), self.get_description(), self.get_object())
         self.ui_attributes.set_items(attributes)
 
-    def assign(self, flag):
+    def assign(self, flag=False):
         PtxBaker.perform_conversion(self)
 
 
