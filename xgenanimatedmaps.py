@@ -323,7 +323,7 @@ class PtxBaker(XgenAnimSettingsDependant):
             # Append a new frame reference to the attribute.
             if not frame == end_frame:
                 attr.append_line(
-                    '%s ($frame < %s) {' % ('if' if frame == start_frame else 'else if', frame)
+                    '%s ($frame <= %s) {' % ('if' if frame == start_frame else 'else if', frame)
                 )
             else:
                 attr.append_line(
