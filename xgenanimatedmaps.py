@@ -11,7 +11,10 @@ class Utils:
 
     @staticmethod
     def safe_string(value):
-        return unicodedata.normalize('NFKD', value).encode('ascii', 'ignore')
+        if type(value) is unicode:
+            value = unicodedata.normalize('NFKD', value).encode('ascii', 'ignore')
+
+        return value
 
     @staticmethod
     def use_global_vars(value, project):
@@ -71,9 +74,6 @@ class UiElementWrapper(object):
             self.set_value(default_value)
 
     def set_value(self, value):
-        if type(value) is unicode:
-            value = Utils.safe_string(value)
-
         self.value = value
 
         if self.settings:
@@ -161,7 +161,9 @@ class UiObjectSelection(UiElementWrapper):
     Implements encapsulated object selection ui element.
     """
 
-    def __init__(self, id, object_types=[], label='', button_label='Selection', change_callback=None, project=None):
+    def __init__(self, id, object_types=None, label='', button_label='Selection', change_callback=None, project=None):
+        object_types = object_types or []
+
         super(UiObjectSelection, self).__init__(id, change_callback=change_callback, project=project)
         self.object_types = object_types
 
@@ -222,7 +224,13 @@ class ProjectSettings:
         return result
 
     def set(self, id, value):
+        # Ensure value usage safety.
+        value = Utils.safe_string(value)
+
+        # Set the storage value.
         self._storage[id] = value
+
+        return self
 
     def has(self, id):
         return id in self._storage and self._storage[id]
@@ -374,11 +382,6 @@ class XgenAnim:
 
                 pm.button('update', label='Update', c=self.update_collections)
 
-                self.ui_sequence = UiObjectSelection('xgenSequence', label='Animated Sequence Node',
-                                                     object_types=['file', 'projection'], project=self)
-                self.ui_emitter = UiObjectSelection('xgenEmitter', label='xGen Emitter Object',
-                                                    object_types=['transform'], project=self)
-
                 self.ui_progress = UiProgressBar('xgenProgress', 1000)
 
                 pm.button('assign', label='Assign', c=self.assign)
@@ -426,7 +429,32 @@ class XgenAnim:
         attributes = xg.allAttrs(self.get_collection(), self.get_description(), self.get_object())
         self.ui_attributes.set_items(attributes)
 
+    def get_selection_typed(self, type, inverse=False):
+        selection = cmds.ls(sl=True)
+        result = None
+
+        for item in selection:
+            if cmds.objectType(item) == type:
+                if not inverse:
+                    result = item
+            elif inverse:
+                result = item
+
+        return result
+
+
     def assign(self, flag=False):
+        # Get selected object.
+        object = self.get_selection_typed('transform')
+        node = self.get_selection_typed('transform', True)
+
+        if not object or not node:
+            return cmds.warning('Selection must contain a target object and texture source node.')
+
+        # Set alleged nodes.
+        self.settings.set('xgenEmitter', object).set('xgenSequence', node)
+
+        # Perform the baking conversion.
         PtxBaker.perform_conversion(self)
 
 
