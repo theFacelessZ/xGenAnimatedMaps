@@ -161,9 +161,9 @@ class UiObjectSelection(UiElementWrapper):
     Implements encapsulated object selection ui element.
     """
 
-    def __init__(self, id, object_type='', label='', button_label='Selection', change_callback=None, project=None):
+    def __init__(self, id, object_types=[], label='', button_label='Selection', change_callback=None, project=None):
         super(UiObjectSelection, self).__init__(id, change_callback=change_callback, project=project)
-        self.object_type = object_type
+        self.object_types = object_types
 
         # Create the element itself.
         self.id = pm.textFieldButtonGrp(id, label=label, bl=button_label, bc=self.object_selection, tcc=self.set_value)
@@ -179,8 +179,8 @@ class UiObjectSelection(UiElementWrapper):
         obj = obj[0]
 
         # Check the object type compliance, if any is given.
-        if self.object_type and not cmds.objectType(obj) == self.object_type:
-            return cmds.warning('Selected object is of a wrong type. Anticipated %s.' % self.object_type)
+        if len(self.object_types) and not cmds.objectType(obj) in self.object_types:
+            return cmds.warning('Selected object is of a wrong type. Anticipated any of the following types: %s.' % ', '.join(self.object_types))
 
         self.set_value(obj)
 
@@ -230,7 +230,9 @@ class ProjectSettings:
 
 class XgenAnimSettingsDependant(object):
 
-    def __init__(self, project, required_settings=[]):
+    def __init__(self, project, required_settings=None):
+        required_settings = required_settings or []
+
         self.project = project
         self.required_settings = required_settings
 
@@ -287,7 +289,7 @@ class PtxBaker(XgenAnimSettingsDependant):
         obj = self.get_settings('xgenObject')
         start_frame = int(cmds.playbackOptions(q=True, minTime=True))
         end_frame = int(cmds.playbackOptions(q=True, maxTime=True))
-        tpu = self.get_settings('xgenResolution', 100)
+        tpu = self.get_settings('xgenResolution', 512)
 
         # Check whether the alleged attribute has a map assigned.
         path_map = self.get_assigned_map()
@@ -317,8 +319,7 @@ class PtxBaker(XgenAnimSettingsDependant):
             cmds.ptexBake(inMesh=emitter, o=path, bt=sequence, tpu=tpu)
 
             if os.path.isfile(path_bake):
-                frame_file = '%s%s.%s.ptx' % (path, emitter, frame)
-                shutil.copy2(path_bake, frame_file)
+                shutil.copy2(path_bake, '%s%s.%s.ptx' % (path, emitter, frame))
 
             # Append a new frame reference to the attribute.
             if not frame == end_frame:
@@ -374,9 +375,9 @@ class XgenAnim:
                 pm.button('update', label='Update', c=self.update_collections)
 
                 self.ui_sequence = UiObjectSelection('xgenSequence', label='Animated Sequence Node',
-                                                     object_type='file', project=self)
+                                                     object_types=['file', 'projection'], project=self)
                 self.ui_emitter = UiObjectSelection('xgenEmitter', label='xGen Emitter Object',
-                                                    object_type='transform', project=self)
+                                                    object_types=['transform'], project=self)
 
                 self.ui_progress = UiProgressBar('xgenProgress', 1000)
 
