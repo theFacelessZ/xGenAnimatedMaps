@@ -1,5 +1,6 @@
 import maya.cmds as cmds
 import maya.OpenMaya as om
+import maya.utils as mu
 import pymel.core as pm
 import xgenm as xg
 import os
@@ -86,6 +87,37 @@ class UiElementWrapper(object):
         if callable(self.on_change):
             self.on_change()
 
+
+class UiButtonToggle(UiElementWrapper):
+    """
+    Implements toggling button.
+    """
+    background = [0.3, 0.3, 0.3]
+
+    def __init__(self, id, on_label='', off_label='', callback=None):
+        super(UiButtonToggle, self).__init__(id)
+
+        self.id = pm.button(id, label=off_label, c=self.on_click, bgc=self.background)
+        self.on_label = on_label
+        self.off_label = off_label or on_label
+        self.callback = callback
+        self.toggled = False
+
+    def on_click(self, flag=False):
+        self.toggled = not self.toggled
+
+        background = self.background
+        label = self.off_label
+        if self.toggled:
+            background = [0.2, 0.2, 0.2]
+            label = self.on_label
+
+        # Toggle button visuals.
+        pm.button(self.id, e=True, bgc=background, label=label)
+
+        # Execute the callback.
+        if self.callback:
+            self.callback(self.toggled)
 
 class UiProgressBar(UiElementWrapper):
     """
@@ -270,6 +302,10 @@ class PtxBaker(XgenAnimSettingsDependant):
         # Perform the baking procedure.
         (PtxBaker(project)).convert()
 
+    @staticmethod
+    def perform_preview(project):
+        (PtxBaker(project).preview())
+
     def __init__(self, project):
         super(PtxBaker, self).__init__(project, ['xgenCollection', 'xgenDescription', 'xgenSequence',
                                                  'xgenEmitter', 'xgenAttribute'])
@@ -278,10 +314,18 @@ class PtxBaker(XgenAnimSettingsDependant):
         self.description = self.get_settings('xgenDescription')
         self.emitter = self.get_settings('xgenEmitter')
         self.sequence = self.get_settings('xgenSequence')
+        self.is_bakeable = cmds.objectType(self.sequence) == 'file'
         self.obj = self.get_settings('xgenObject')
         self.attr = XgenAttributeWrapper(self.get_settings('xgenAttribute'), self.collection, self.description, self.obj)
         self.expression = self.get_settings('xgenExpression', self.get_expression() or '$a')
         self.tpu = self.get_settings('xgenResolution', 512)
+
+        # Resolve paths.
+        self.path_map = '/paintmaps/%s' % self.attr.id
+        self.path = '%s/%s/' % (xg.descriptionPath(self.collection, self.description), self.path_map)
+        self.path_bake = '%s%s.ptx' % (self.path, self.emitter)
+
+        self.cached_frames = []
 
     def get_assigned_map(self):
         attr_map = re.search("^[^#]+=map\(\\'(.*?)\\'", self.attr.value)
@@ -303,22 +347,79 @@ class PtxBaker(XgenAnimSettingsDependant):
 
         return result
 
+    def get_start_frame(self):
+        return int(cmds.playbackOptions(q=True, minTime=True))
+
+    def get_end_frame(self):
+        return int(cmds.playbackOptions(q=True, maxTime=True))
+
+    def get_current_frame(self):
+        return int(cmds.currentTime(q=True))
+
+    def cache_complete(self):
+        return range(self.get_start_frame(), self.get_end_frame()) == self.cached_frames
+
+    def cache_get_missing_frame(self):
+        frames = range(self.get_start_frame(), self.get_end_frame())
+        current_frame = self.get_current_frame()
+        bake_frame = None
+
+        if current_frame in frames:
+            index = frames.index(current_frame)
+            frames = frames[index:] + frames[:index]
+
+        for item in frames:
+            if item not in self.cached_frames:
+                bake_frame = item
+
+                break
+
+        return bake_frame
+
+    def preview(self):
+        if not self.validate():
+            return cmds.warning('Missing required settings.')
+
+        def test(*args, **kwargs):
+            print('test')
+
+        # Initialize preview callbacks.
+        om.MNodeMessage.addAttributeChangedCallback(self.emitter, test)
+
+        # Initialize background conversion loop.
+        mu.executeDeferred(self.convert_preview)
+
+    def convert_preview(self):
+        if not self.validate():
+            return cmds.warning('Missing required settings.')
+
+        # Render closest frame to the left side from current frame.
+        if self.cache_complete():
+            return
+
+        bake_frame = self.cache_get_missing_frame()
+        if not bake_frame:
+            return cmds.warning('No frames to bake left.')
+
+        # Bake preview frame.
+        self.bake(bake_frame)
+
+        # Store cached frame.
+        self.cached_frames.append(bake_frame)
+
+        mu.executeDeferred(self.convert_preview)
+
     def convert(self, start_frame=None, end_frame=None):
         # Validate settings fields.
         if not self.validate():
             return cmds.warning('Missing required settings.')
 
-        start_frame = start_frame or int(cmds.playbackOptions(q=True, minTime=True))
-        end_frame = end_frame or int(cmds.playbackOptions(q=True, maxTime=True) + 1)
+        start_frame = start_frame or self.get_start_frame()
+        end_frame = end_frame or self.get_end_frame()
 
         # Check whether the alleged attribute has a map assigned.
-        path_map = self.get_assigned_map()
-        if not path_map:
+        if not self.get_assigned_map():
             return cmds.warning('No map is currently assigned to the channel selected.')
-
-        path_map = '/paintmaps/%s' % self.attr.id
-        path = '%s/%s/' % (xg.descriptionPath(self.collection, self.description), path_map)
-        path_bake = '%s%s.ptx' % (path, self.emitter)
 
         # Prepare the ui.
         self.project.ui_progress.set_max_value(end_frame).set_progress(start_frame)
@@ -338,27 +439,9 @@ class PtxBaker(XgenAnimSettingsDependant):
 
         is_file = cmds.objectType(self.sequence) == 'file'
 
-        # Bake it.
         for frame in range(start_frame, end_frame):
-            # Set current time.
-            cmds.currentTime(frame)
-
-            # Make sure source sequence can be baked.
-            bake_node = self.sequence
-            if not is_file:
-                bake_node = cmds.convertSolidTx(bake_node, self.emitter, alpha=False, antiAlias=False, bm=2, fts=True,
-                                                sp=False, sh=False, ds=False, cr=False, rx=self.tpu, ry=self.tpu, fil='iff',
-                                                fileImageName='xgenBakeTemp')
-                if len(bake_node):
-                    bake_node = bake_node[0]
-
-            cmds.ptexBake(inMesh=self.emitter, o=path, bt=bake_node, tpu=self.tpu)
-
-            if not is_file:
-                cmds.delete(bake_node)
-
-            if os.path.isfile(path_bake):
-                shutil.copy2(path_bake, '%s%s.%s.ptx' % (path, self.emitter, frame))
+            # Bake it.
+            self.bake(frame)
 
             # Append a new frame reference to the attribute.
             if not frame == end_frame:
@@ -371,7 +454,7 @@ class PtxBaker(XgenAnimSettingsDependant):
                 )
 
             self.attr.append_line(
-                '\t$a=map(\'${DESC}%s/%s.%s.ptx\');' % (path_map, self.emitter, frame)
+                '\t$a=map(\'${DESC}%s/%s.%s.ptx\');' % (self.path_map, self.emitter, frame)
             ).append_line(
                 '}'
             )
@@ -381,6 +464,32 @@ class PtxBaker(XgenAnimSettingsDependant):
 
         # Set the attribute script.
         self.attr.append_line(self.expression).commit()
+
+    def bake(self, frame):
+        result = None
+
+        # Set required frame.
+        cmds.currentTime(frame)
+
+        # Make sure source sequence can be baked.
+        bake_node = self.sequence
+        if not self.is_bakeable:
+            bake_node = cmds.convertSolidTx(bake_node, self.emitter, alpha=False, antiAlias=False, bm=2, fts=True,
+                                            sp=False, sh=False, ds=False, cr=False, rx=self.tpu, ry=self.tpu, fil='iff',
+                                            fileImageName='_xgenBakeTemp')
+            if len(bake_node):
+                bake_node = bake_node[0]
+
+        cmds.ptexBake(inMesh=self.emitter, o=self.path, bt=bake_node, tpu=self.tpu)
+
+        if not self.is_bakeable:
+            cmds.delete(bake_node)
+
+        if os.path.isfile(self.path_bake):
+            result = '%s%s.%s.ptx' % (self.path, self.emitter, frame)
+            shutil.copy2(self.path_bake, result)
+
+        return result
 
 
 class XgenAnim:
@@ -417,6 +526,7 @@ class XgenAnim:
                 self.ui_progress = UiProgressBar('xgenProgress', 1000)
 
                 pm.button('assign', label='Assign', c=self.assign)
+                self.ui_preview = UiButtonToggle('preview', off_label='Preview', on_label='Stop Preview', callback=self.preview)
 
         self.window.show()
 
@@ -474,8 +584,10 @@ class XgenAnim:
 
         return result
 
+    def preview(self, flag=False):
+        pass
 
-    def assign(self, flag=False):
+    def assign(self, preview=False, flag=False):
         # Get selected object.
         object = self.get_selection_typed('transform')
         node = self.get_selection_typed('transform', True)
@@ -486,8 +598,11 @@ class XgenAnim:
         # Set alleged nodes.
         self.settings.set('xgenEmitter', object).set('xgenSequence', node)
 
-        # Perform the baking conversion.
-        PtxBaker.perform_conversion(self)
+        if not preview:
+            # Perform the baking conversion.
+            PtxBaker.perform_conversion(self)
+        else:
+            PtxBaker.preview(self)
 
 
 if __name__ == '__main__':
