@@ -331,7 +331,7 @@ class PtxBaker(XgenAnimSettingsDependant):
         ).append_line(
             "# You're free to modify it as you please, just remember to do that with care."
         ).append_line(
-            '# You may be ridiculed by the size of the script, considering the alleged ability to'
+            '# You may be surprised by the enormous size of the script, considering the alleged ability to'
         ).append_line(
             '# assign multiple expression variables within strings, yet this is the safest way of'
         ).append_line(
